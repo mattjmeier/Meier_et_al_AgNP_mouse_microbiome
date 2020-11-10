@@ -1,0 +1,811 @@
+---
+title: "16S sequencing of AgNP-exposed gut microbiome"
+author: "Matthew J. Meier"
+subtitle: "Differentially abundant taxa: Report prepared for Azam Tayabali"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: spacelab # flatly spacelab sandstone cerulean
+knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding = encoding, output_file = file.path(dirname(inputFile), paste0("Microbiome_AgNP_analysis_",format(Sys.time(), '%d-%m-%Y.%H.%M'),".html"))) })
+---
+
+
+***
+  
+# Revision History
+  
+**This version**  
+  
+*Current version: 1*  
+Date report generated: `r format(Sys.time(), '%d %B, %Y')`  
+Purpose of report: To provide analysis of 16S sequence data on the microbiome of AgNP-gavage exposed mice.  
+Report prepared for: Dr. Azam Tayabali
+
+**Previous revisions**  
+  
+N/A  
+
+
+***
+  
+# Code setup
+
+## Load libraries
+
+```{r docSetup, warning=FALSE, message=FALSE}
+# Load libraries
+library(phyloseq)
+library(gridExtra)
+library(dada2)
+library(msa)
+library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+library(phangorn)
+library(tidyverse)
+library(DESeq2)
+library(reshape2)
+library(tidyr)
+library(biomformat)
+library(DECIPHER)
+library(vegan)
+
+```
+
+# Run DADA2
+
+This section will run DADA2, or, if specified, load a pre-run RData file containing the results.
+
+```{r run-dada}
+# Define folders
+path <- "~/shared/data/2020_Tayabali/16S/fastq/fastp/"
+filt_path <- file.path("~/shared/data/2020_Tayabali/16S/dada2/", "filtered/")
+plots_path <- file.path("~/shared/data/2020_Tayabali/16S/dada2/", "plots/")
+
+### Barebones commands to run DADA2 on Illumina data ###
+runDADA2=F
+if ( runDADA2 == T ) {
+
+
+dir.create(plots_path)
+
+# Get forward and reverse FQ files, ensure regex/globbing pattern is correct for your case!
+fnFs <- sort( list.files(path, pattern="R1_001.fastq.gz", full.names = TRUE))
+fnRs <- sort( list.files(path, pattern="R2_001.fastq.gz", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "\\."), `[`, 1)
+sample.names <- sapply(strsplit(sample.names, "_L001_R1_001"), `[`, 1)
+
+fnFsPlot <- plotQualityProfile(fnFs[1:length(fnFs)])
+fnRsPlot <- plotQualityProfile(fnRs[1:length(fnRs)])
+
+# pdf(file=paste0(plots_path,"/Read_quality.pdf"), width=8.5, height=11)
+# print(fnFsPlot)
+# print(fnRsPlot)
+# dev.off()
+
+filtFs <- file.path(filt_path, paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(sample.names, "_R_filt.fastq.gz"))
+
+out <- filterAndTrim(fnFs, filtFs,
+                     fnRs, filtRs,
+                     truncLen=c(241,231),
+                     trimLeft=1,
+                     maxN=0,
+                     maxEE=c(2,2),
+                     truncQ=2,
+                     rm.phix=TRUE,
+                     compress=TRUE,
+                     multithread=TRUE)
+
+fnFsPlot_filt <- plotQualityProfile(filtFs[1:length(filtFs)])
+fnRsPlot_filt <- plotQualityProfile(filtRs[1:length(filtRs)])
+
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+pdf(file=paste0(plots_path,"/Error_profiles.pdf"), width=8.5, height=11)
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+dev.off()
+
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+
+seqtab <- makeSequenceTable(mergers)
+write.table(dim(seqtab), paste0(plots_path,"/dim_seqtab.txt"), quote=FALSE, sep="\t")
+write.table(table(nchar(getSequences(seqtab))), paste0(plots_path,"/sequence_lengths_after_merging.txt"), quote=FALSE, sep="\t")
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% seq(432,447)]
+
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+write.table(dim(seqtab.nochim), paste0(plots_path,"/dim_seqtab.nochim.txt"), quote=FALSE, sep="\t")
+write.table(sum(seqtab.nochim)/sum(seqtab), paste0(plots_path,"/proportion_of_bimera.txt"), quote=FALSE, sep="\t")
+
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(mergers, getN), rowSums(seqtab), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoised", "merged", "tabled", "nonchim")
+rownames(track) <- sample.names
+#head(track)
+write.table(track, paste0(plots_path,"/read_tracking.txt"), quote=FALSE, sep="\t")
+
+taxa_silva <- assignTaxonomy(seqtab.nochim, "~/shared/dbs/microbial/references/silva_nr_v138_train_set.fa.gz", multithread=TRUE, tryRC=TRUE)
+taxa_silva <- addSpecies(taxa_silva, "~/shared/dbs/microbial/references/silva_species_assignment_v138.fa.gz")
+
+taxa_rdp <- assignTaxonomy(seqtab.nochim, "~/shared/dbs/microbial/references/rdp_train_set_16.fa.gz", multithread=TRUE)
+taxa_rdp <- addSpecies(taxa_rdp, "~/shared/dbs/microbial/references/rdp_species_assignment_16.fa.gz")
+
+# taxa.print <- taxa # Removing sequence rownames for display only
+# rownames(taxa.print) <- NULL
+# head(taxa.print)
+
+seqs <- getSequences(seqtab.nochim)
+names(seqs) <- seqs
+# mult <- msa(seqs, method="ClustalW", type="dna", order="input")
+alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA)
+
+save.image(file=paste0(filt_path,"/DADA2_Illumina_output.Mouse_AgNP.Final.Rdata"))
+savehistory(file = paste0(filt_path,"/DADA2_Illumina.Mouse_AgNP.Final.Rhistory"))
+
+# library(phangorn)
+# phang.align <- phyDat(as(alignment,"matrix"),type="DNA")
+# dm <- dist.ml(phang.align)
+# treeNJ <- NJ(dm) ## Tip order is not the same as sequence order!
+# fit = pml(treeNJ, data=phang.align)
+# # negative edges lengths changed to 0
+# fitGTR <- update(fit, k=4, inv=0.2)
+# fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE, rearrangement = "stochastic", control = pml.control(trace = 0))
+# 
+# detach("package:phangorn", unload=TRUE)
+# save.image(file=paste0(filt_path,"/DADA2_Illumina_output.Mouse_AgNP.Final.Tree.Rdata"))
+
+} else {
+  load(paste0(filt_path,"/DADA2_Illumina_output.Mouse_AgNP.Final.compact.Rdata"))
+  #load(paste0(filt_path,"/DADA2_Illumina_output.Mouse_AgNP.Final.Rdata"))
+  #load("~/data/2020_Tayabali/2017Azam/dada2/DADA2_Illumina_output.Azam.March12.PS_loaded.DESeq2.TREE.Rdata")
+}
+
+
+```
+
+# Load data and pre-process
+
+```{r preliminary_analysis}
+setwd("~/shared/data/2020_Tayabali/2017Azam")
+
+# Import tree
+x = read_tree_greengenes("~/shared/dbs/microbial/trees/97_otus.tree")
+
+# # Import sample data file
+# sampledata<-sample_data(read.table("sampledata.txt", sep="\t",header=T))
+# sampledata$Silver_Treatment <- as.factor(sampledata$Silver_Concentration)
+
+# Import biom file: This is from QIIME 1 and considered obsolete now.
+# data <- import_biom("otu_table.biom", parseFunction=parse_taxonomy_greengenes, treefilename=x)
+# 
+# colnames(data@otu_table) <- gsub("\\.S.*.L001.fastqjoin.join.fastq", "", colnames(data@otu_table))
+# 
+# data <- merge_phyloseq(data,sampledata)
+# 
+# data = subset_samples(data, sample_names(data) != "50AGAB56-C")
+# 
+# topsp <- names(sort(taxa_sums(data), TRUE)[1:300])
+# data.topsp <- prune_taxa(topsp, data) 
+# 
+set.seed(1)
+# data.rarefied <- rarefy_even_depth(data, rngseed = T)
+
+sampleorder <- read.table("./sampleorder.txt")
+
+#########################
+#########################
+####  DADA2 Analysis  ###
+#########################
+#########################
+
+sampledata.df <- read.table("./sampledata.txt", sep="\t",header=T)
+# row.names(seqtab.nochim) and row.names(sampledata.df) ### Perform a sanity check on this!!!! Critical to have correct sample naming.
+row.names(seqtab.nochim) <- sapply(strsplit(row.names(seqtab.nochim), "\\_"), `[`, 1)
+sampledata.df$Silver_Treatment <- as.factor(sampledata.df$Silver_Concentration)
+sampledata.df$Group <- as.factor(paste0(as.factor(sampledata.df$Silver_Concentration),
+                                        as.factor(sampledata.df$Antibiotics)))
+sampledata.df$Group <-  factor(sampledata.df$Group, levels=c("0N", "1N", "5N", "0Y", "1Y", "5Y")) 
+sampleOrder=row.names(sampledata.df)
+
+row.names(seqtab.nochim) <- gsub(row.names(seqtab.nochim), pattern = "50AG", replacement = "5AG")
+row.names(seqtab.nochim) <- gsub(row.names(seqtab.nochim), pattern = "10AG", replacement = "1AG")
+
+track <- as.data.frame(track)
+track$sample <- row.names(track)
+track$sample <- gsub(track$sample, pattern = "_.*", replacement = "")
+track$sample <- gsub(track$sample, pattern = "50AG", replacement = "5AG")
+track$sample <- gsub(track$sample, pattern = "10AG", replacement = "1AG")
+
+ps_untrimmed <- ps <- phyloseq(tax_table(taxa_silva), sample_data(sampledata.df), otu_table(seqtab.nochim, taxa_are_rows=FALSE))
+
+removeSamples <- as.data.frame(track) %>% filter(input<10000)
+ps <- prune_samples(!sample_names(ps) %in% removeSamples$sample, ps) # Remove samples with fewer than 10,000 reads
+#ps <- prune_samples(sample_names(ps) !="50AGAB56-C", ps)
+ps <- subset_taxa(ps,  !is.na(Phylum) &! Phylum %in% c("", "uncharacterized"))
+
+## Filter spurious taxa
+table(tax_table(ps)[, "Phylum"], exclude=NULL)
+prevdf = apply(X = otu_table(ps),
+               MARGIN = ifelse(taxa_are_rows(ps),
+                               yes=1, no=2),
+               FUN = function(x) {sum(x>0)})
+
+prevdf = data.frame(Prevalence = prevdf, TotalAbundance = taxa_sums(ps),tax_table(ps))
+
+#plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+
+filterPhyla <- c("Synergistetes","Deferribacterota","Cyanobacteria")
+ps <- subset_taxa(ps, !Phylum %in% c("Synergistetes","Deferribacterota","Cyanobacteria"))
+ps <- subset_taxa(ps, !Family %in% c("Mitochondria"))
+
+prevdf1 = subset(prevdf, Phylum  %in% get_taxa_unique(ps,"Phylum"))
+
+ggplot(prevdf1,  aes(TotalAbundance, Prevalence/nsamples(ps), color=Phylum)) + 
+  geom_hline(yintercept=0.01, alpha=0.5, linetype=2) +
+  geom_point(size=2, alpha=0.7) + scale_x_log10()+  xlab("Total Abundance") + 
+  ylab("Prevalence [Frac. Samples]")+ facet_wrap(~ Phylum) + theme(  legend.position  =   "none")
+
+prevalenceThreshold = 0.01*nsamples(ps)
+keepTaxa=rownames(prevdf1)[(prevdf1$Prevalence>=prevalenceThreshold)]
+ps=prune_taxa(keepTaxa, ps)
+
+```
+
+# Export data for QIIME2
+
+```{r export_QIIME2}
+
+### EXPORT FOR QIIME2 ####
+
+# Export taxonomy table as "tax.txt"
+
+tax<-as(tax_table(ps),"matrix")
+tax_cols <- colnames(tax)
+tax<-as.data.frame(tax)
+tax$taxonomy<-do.call(paste, c(tax[tax_cols], sep=";"))
+for(co in tax_cols) tax[co]<-NULL
+write.table(tax, "tax.txt", quote=FALSE, col.names=FALSE, sep="\t")
+
+# Export feature/OTU table
+# As a biom file
+otu<-t(as(otu_table(ps),"matrix")) # 't' to transform if taxa_are_rows=FALSE
+otu_biom<-make_biom(data=otu)
+write_biom(otu_biom,"otu_biom_for_qiime.biom")
+
+# As a text file
+write.table(t(seqtab.nochim), "seqtab.txt", sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+
+# As a FASTA file
+uniquesToFasta(seqtab.nochim, fout='rep-seqs.fna', ids=colnames(seqtab.nochim))
+
+```
+
+# Richness plots
+
+```{r plots_richness}
+
+richness_df <- estimate_richness(ps_untrimmed, split = TRUE, measures = NULL)
+richness_df$sample <- row.names(richness_df)
+richness_df <- richness_df %>% dplyr::arrange(Observed)
+
+### Plot Richness
+abio.labs <- c("No antibiotics","With antibiotics")
+names(abio.labs) <- c("N","Y")
+richness_plot <- plot_richness(ps_untrimmed, x="Treatment",
+              measures=c("Observed",
+                         "Chao1",
+                         "Shannon",
+                         "Simpson"),
+              color="Silver_Treatment",
+              shape="Body_site") +
+  theme_bw() +
+  geom_point(size=2) +
+  labs(x = "",
+       color="AgNP concentration",
+       shape="Microbiome") +
+  theme(axis.text.x = element_text(angle = 90),
+        strip.background = element_rect(color="black", fill="white"),
+        strip.text = element_text(face = "bold")) +
+  facet_grid(variable~Antibiotics,
+             scales="free",
+             labeller = labeller(Antibiotics=abio.labs))
+
+richness_plot$layers <- NULL
+richness_plot + geom_jitter(position = position_dodge2(width=0.5))  +
+  scale_colour_brewer(palette = "Dark2")
+```
+
+# Ordination plots
+
+```{r ordination}
+
+### ORDINATION
+N=10
+ps.ord <- prune_samples(sample_sums(ps)>=N, ps)
+ps.ord <- transform_sample_counts(ps.ord, function(x){x/sum(x)})
+ord.nmds.bray <- ordinate(ps.ord, method="NMDS", distance="bray")
+
+
+
+
+# pairwise.adonis()
+
+physeq.bray.dist <- phyloseq::distance(ps.ord, method="bray")
+adonisResults <- adonis2(physeq.bray.dist ~ Silver_Treatment * Antibiotics, as(sample_data(ps.ord), "data.frame"))
+adonisResults
+
+plot_ordination(ps, ord.nmds.bray, color="Silver_Treatment",
+                shape="Antibiotics",
+                title="Bray NMDS") + 
+  geom_point(size=3)
+
+fig1.ord <- ordinate(ps.ord,
+                     method="PCoA",
+                     distance="jaccard")
+
+evals <- fig1.ord$values$Eigenvalues
+
+fig1 <- plot_ordination(ps.ord, fig1.ord,
+                        color = "Silver_Treatment",
+                        shape="Body_site")
+#colnames(fig1$data)[1:2] <- c("PC1", "PC2")
+
+fig1data <- fig1$data
+# ggplot(fig1data, aes(x=PC1, y=PC2, color=Silver_Concentration)) +
+fig1 <- fig1 +
+  geom_point(size=2) +
+  coord_fixed(sqrt(evals[2] / evals[1])) +
+  ggtitle(label="PCoA","Jaccard Distance") +
+  #scale_color_discrete(name="Silver concentration",
+   #                    labels = c("0", "1", "5")) +
+  theme_bw() +
+  theme(strip.background = element_rect(color="black", fill="white"),
+        strip.text = element_text(face = "bold")) + 
+  facet_grid(Antibiotics~Silver_Treatment) +
+  scale_colour_brewer(palette = "Dark2",
+                      name="Silver concentration",
+                       labels = c("0", "1", "5")) +
+   labs(color="AgNP concentration",
+        shape="Microbiome") 
+
+fig1
+# ord.nmds.jaccard <- ordinate(ps, method="NMDS", distance="jaccard")
+# plot_ordination(ps, ord.nmds.jaccard, color="Group",shape="Body_site", title="Jaccard NMDS")+ geom_point(size=3)
+# ord.nmds.wunifrac <- ordinate(ps, method="NMDS", distance="wunifrac")
+# plot_ordination(ps, ord.nmds.wunifrac, color="Silver_Treatment", shape="Antibiotics",title="Weighted Unifrac NMDS")+ geom_point(size=3)
+# ord.rda.wunifrac <- ordinate(ps, method="RDA", distance="wunifrac")
+# plot_ordination(ps, ord.rda.wunifrac, color="Silver_Treatment", shape="Antibiotics",title="Weighted Unifrac RDA")+ geom_point(size=3)
+# ord.rda.unifrac <- ordinate(ps, method="RDA", distance="unifrac")
+# plot_ordination(ps, ord.rda.unifrac, color="Silver_Treatment", shape="Antibiotics",title="Unifrac RDA")+ geom_point(size=3)
+# ord.dca.wunifrac <- ordinate(ps, method="DCA", distance="wunifrac")
+# plot_ordination(ps, ord.dca.wunifrac, color="Silver_Treatment", shape="Antibiotics",title="Weighted Unifrac DCA")+ geom_point(size=3)
+# ord.dca.bray <- ordinate(ps, method="DCA", distance="bray")
+# plot_ordination(ps, ord.dca.bray, color="Silver_Treatment", shape="Antibiotics",title="Bray DCA")+ geom_point(size=3)
+
+```
+
+
+```{r barplots}
+
+ps_glom_species <- tax_glom(ps, taxrank="Species", NArm=FALSE)
+ps_glom_species_transformed <-transform_sample_counts(ps_glom_species, function(x) x / sum(x))
+# plot_bar(ps_glom_species, fill="Genus")
+plot_bar(ps_glom_species_transformed, fill="Genus") +
+  theme(legend.position = "bottom")
+
+ps_glom_genus <- tax_glom(ps, taxrank="Genus", NArm=FALSE)
+ps_glom_genus_transformed <-transform_sample_counts(ps_glom_genus, function(x) x / sum(x))
+
+# plot_tree(ps_glom_species_transformed, method="sampledodge", size="Abundance", justify="yes please", ladderize="left" , color="Spike_percent") +
+#   scale_size_continuous(range = c(1, 3))
+
+plot_bar(ps_glom_species_transformed, fill="Genus") +
+  facet_grid(~Antibiotics, scales="free")
+
+top20 <- names(sort(taxa_sums(ps_glom_genus_transformed), decreasing=TRUE))[1:20]
+ps.top20 <- prune_taxa(top20, ps_glom_genus_transformed)
+# ps.top20 <- transform_sample_counts(ps.top20, function(OTU) OTU/sum(OTU))
+
+top100 <- names(sort(taxa_sums(ps_glom_genus), decreasing=TRUE))[1:100]
+ps.top100 <- prune_taxa(top100, ps_glom_genus)
+ps.top100 <- transform_sample_counts(ps.top100, function(OTU) OTU/sum(OTU))
+# ps.top100 <- tax_glom(ps.top100, taxrank="Genus", NArm=TRUE)
+
+
+# Better to use a grid with specified size?
+plot_bar(ps.top100, x="Sample", fill="Phylum") + 
+  facet_wrap(~ Group, scales="free")
+plot_bar(ps.top100, x="Sample", fill="Class") + 
+  facet_wrap(~ Group, scales="free")
+plot_bar(ps.top100, x="Sample", fill="Order") + 
+  facet_wrap(~ Group, scales="free")
+plot_bar(ps.top100, x="Sample", fill="Family") + 
+  facet_wrap(~ Group, scales="free")
+plot_bar(ps.top100, x="Sample", fill="Family") + 
+  facet_grid(scales="free", rows = vars(Silver_Treatment), cols = vars(Antibiotics))
+plot_bar(ps.top100, x="Sample", fill="Genus") + 
+  facet_wrap(~ Group, scales="free")
+
+length(table(tax_table(ps.top100)[, "Phylum"], exclude=NULL))
+length(table(tax_table(ps.top100)[, "Class"], exclude=NULL))
+length(table(tax_table(ps.top100)[, "Order"], exclude=NULL))
+length(table(tax_table(ps.top100)[, "Family"], exclude=NULL))
+length(table(tax_table(ps.top100)[, "Genus"], exclude=NULL))
+length(table(tax_table(ps.top20)[, "Genus"], exclude=NULL))
+
+length(table(tax_table(ps_glom_genus_transformed)[, "Phylum"], exclude=NULL))
+length(table(tax_table(ps_glom_genus_transformed)[, "Class"], exclude=NULL))
+length(table(tax_table(ps_glom_genus_transformed)[, "Order"], exclude=NULL))
+length(table(tax_table(ps_glom_genus_transformed)[, "Family"], exclude=NULL))
+length(table(tax_table(ps_glom_genus_transformed)[, "Genus"], exclude=NULL))
+length(table(tax_table(ps)[, "Genus"], exclude=NULL))
+
+ cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+ getPalette = colorRampPalette(cbbPalette)
+
+
+meltedAll <- ps_glom_genus_transformed %>% psmelt()
+meltedAll$GroupPlot <- factor(meltedAll$Group,
+                                 levels=c("0N", "1N", "5N", "0Y","1Y","5Y"),
+                                 labels=c("0", "1", "5", "0 + Ab","1 + Ab","5 + Ab"))
+
+meltedTop100 <- ps.top100 %>% psmelt()
+meltedTop100$GroupPlot <- factor(meltedTop100$Group,
+                                 levels=c("0N", "1N", "5N", "0Y","1Y","5Y"),
+                                 labels=c("0", "1", "5", "0 + Ab","1 + Ab","5 + Ab"))
+
+meltedTop20 <- ps.top20 %>% psmelt()
+meltedTop20$GroupPlot <- factor(meltedTop20$Group,
+                                 levels=c("0N", "1N", "5N", "0Y","1Y","5Y"),
+                                 labels=c("0", "1", "5", "0 + Ab","1 + Ab","5 + Ab"))
+
+ggplot(meltedAll, aes(x=Sample,
+                         y=Abundance)) + 
+  geom_bar(stat="identity",
+           position="stack",
+           aes(fill=Phylum)) +
+  facet_grid(~ GroupPlot,
+             scales="free_x",
+             labeller = labeller(Group=labels)) +
+  scale_fill_manual(values = getPalette(length(levels(meltedAll$Phylum))), na.value="#909090") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text.x=element_text(size=20, face="bold"),
+        legend.text = element_text(size=18),
+        legend.title = element_blank()) +
+  labs(y="Relative abundance") +
+  ggtitle("Phylum-level ESVs")
+
+ggplot(meltedAll, aes(x=Sample,
+                         y=Abundance)) + 
+  geom_bar(stat="identity",
+           position="stack",
+           aes(fill=Class)) +
+  facet_grid(~ GroupPlot,
+             scales="free_x",
+             labeller = labeller(Group=labels)) +
+  scale_fill_manual(values = getPalette(length(levels(meltedAll$Class))), na.value="#909090") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text.x=element_text(size=16, face="bold"),
+        legend.text = element_text(size=14),
+        legend.title = element_text(size=14, face="bold")) +
+  labs(y="Relative abundance") +
+  ggtitle("Class-level ESVs")
+
+
+ggplot(meltedAll, aes(x=Sample,
+                      y=Abundance)) + 
+  geom_bar(stat="identity",
+           position="stack",
+           aes(fill=Family)) +
+  facet_grid(~ GroupPlot,
+             scales="free_x",
+             labeller = labeller(Group=labels)) +
+  scale_fill_manual(values = getPalette(length(levels(meltedAll$Family))), na.value="#909090") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text.x=element_text(size=16, face="bold"),
+        legend.text = element_text(size=14),
+        legend.title = element_text(size=14, face="bold")) +
+  labs(y="Relative abundance") +
+  ggtitle("Family-level ESVs")
+
+ggplot(meltedAll, aes(x=Sample,
+                         y=Abundance)) + 
+  geom_bar(stat="identity",
+           position="stack",
+           aes(fill=Genus)) +
+  facet_grid(~ GroupPlot,
+             scales="free_x",
+             labeller = labeller(Group=labels)) +
+  scale_fill_manual(values = getPalette(length(levels(meltedAll$Genus))), na.value="#909090") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text.x=element_text(size=16, face="bold"),
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.position = "bottom") +
+  labs(y="Relative abundance")+
+  ggtitle("Genus-level ESVs")
+
+ggplot(meltedTop20, aes(x=Sample,
+                      y=Abundance)) + 
+  geom_bar(stat="identity",
+           position="stack",
+           aes(fill=Genus)) +
+  facet_grid(~ GroupPlot,
+             scales="free_x",
+             labeller = labeller(Group=labels)) +
+  scale_fill_manual(values = getPalette(17), na.value="#909090") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text.x=element_text(size=20, face="bold"),
+        legend.text = element_text(size=18),
+        legend.title = element_blank()) +
+  labs(y="Relative abundance")+
+  ggtitle("Genus-level ESVs (20 most abundant)")
+
+
+```
+
+# Differential abundance analysis
+
+```{r differential_abundance}
+
+### Example adapted for Azam's data from dada2
+setwd(filt_path)
+if (file.exists("dds.Rdata")) {
+  print(paste("Already found DESeq2 object from previous run; loading from disk."))
+  load("./dds.Rdata")
+  } else {
+ps <- ps
+ps <- prune_samples(sample_sums(ps) > 500, ps)
+dds = phyloseq_to_deseq2(ps, ~ Group)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(dds), 1, gm_mean)
+dds = estimateSizeFactors(dds, geoMeans = geoMeans)
+dds = DESeq(dds, fitType="local")
+  save(dds, file="./dds.Rdata")
+}
+
+res0Y <- results(dds, contrast=c("Group","0Y","0N"), cooksCutoff = FALSE)
+res1N <- results(dds, contrast=c("Group","1N","0N"), cooksCutoff = FALSE)
+res1Y <- results(dds, contrast=c("Group","1Y","0Y"), cooksCutoff = FALSE)
+res5N <- results(dds, contrast=c("Group","5N","0N"), cooksCutoff = FALSE)
+res5Y <- results(dds, contrast=c("Group","5Y","0Y"), cooksCutoff = FALSE)
+
+alpha = 0.01
+
+sigtab0Y = res0Y[which(res0Y$padj < alpha), ]
+sigtab1N = res1N[which(res1N$padj < alpha), ]
+sigtab1Y = res1Y[which(res1Y$padj < alpha), ]
+sigtab5N = res5N[which(res5N$padj < alpha), ]
+sigtab5Y = res5Y[which(res5Y$padj < alpha), ]
+
+sigtab0Y = cbind(as(sigtab0Y, "data.frame"), as(tax_table(ps)[rownames(sigtab0Y), ], "matrix"))
+sigtab1N = cbind(as(sigtab1N, "data.frame"), as(tax_table(ps)[rownames(sigtab1N), ], "matrix"))
+sigtab1Y = cbind(as(sigtab1Y, "data.frame"), as(tax_table(ps)[rownames(sigtab1Y), ], "matrix"))
+sigtab5N = cbind(as(sigtab5N, "data.frame"), as(tax_table(ps)[rownames(sigtab5N), ], "matrix"))
+sigtab5Y = cbind(as(sigtab5Y, "data.frame"), as(tax_table(ps)[rownames(sigtab5Y), ], "matrix"))
+
+sigtab0Y$contrast <- "0Y_vs_0N"
+sigtab1N$contrast <- "1N_vs_0N"
+sigtab1Y$contrast <- "1Y_vs_0Y"
+sigtab5N$contrast <- "5N_vs_0N"
+sigtab5Y$contrast <- "5Y_vs_0Y"
+
+```
+
+
+# Plot results of differential abundance testing
+
+
+```{r plot_differential_abundance}
+
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+  scale_fill_brewer(palette = palname, ...)
+}
+
+sigtableList <- NULL
+sigtableList <- list(sigtab0Y,sigtab1N,sigtab1Y,sigtab5N,sigtab5Y)
+
+for (sigtable in sigtableList) {
+  
+  # Phylum order
+  x = tapply(sigtable$log2FoldChange, sigtable$Phylum, function(x) max(x))
+  x = sort(x, TRUE)
+  sigtable$Phylum = factor(as.character(sigtable$Phylum), levels=names(x))
+  # Genus order
+  x = tapply(sigtable$log2FoldChange, sigtable$Genus, function(x) max(x))
+  x = sort(x, TRUE)
+  sigtable$Genus = factor(as.character(sigtable$Genus), levels=names(x))
+  
+}
+
+combined_sigtable <- do.call(rbind, sigtableList)
+
+write.table(combined_sigtable, file=paste0(filt_path,"/16S_differential_abundance_table.txt"), quote=F)
+
+#ggplot(sigtab, aes(x=Genus, y=log2FoldChange, color=Phylum)) + geom_point(size=6) + 
+#  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+## Genus plots, no N/A
+# ggplot(subset(sigtab5N, !is.na(Genus)), aes(x=Genus, y=log2FoldChange, color=Phylum)) + geom_point(size=3) + 
+#   theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+
+# Make phyloseq object from the differentially abundant genera
+dataSamplesPruned <- prune_samples(sample_sums(ps)>=500, ps)
+dataSamplesPrunedRarefied <- rarefy_even_depth(dataSamplesPruned)
+dataSamplesPrunedRarefiedSpeciesGlom <- tax_glom(dataSamplesPrunedRarefied, taxrank="Species", NArm=TRUE, bad_empty=c(NA, "", " ", "\t"))
+dataSamplesPrunedRarefiedSpeciesGlom <- tax_glom(dataSamplesPrunedRarefied, taxrank="Species", NArm=FALSE, bad_empty=c(NA, "", " ", "\t"))
+dataSamplesPrunedRarefiedGenusGlom <- tax_glom(dataSamplesPrunedRarefied, taxrank="Genus", NArm=FALSE, bad_empty=c(NA, "", " ", "\t"))
+
+myOrder <- sampledata.df %>%
+  mutate(sample=row.names(sampledata.df)) %>%
+  arrange(Body_site) %>%
+  arrange(Silver_Concentration) %>%
+  arrange(Antibiotics) %>%
+  select(sample)
+  
+plot_heatmap(dataSamplesPrunedRarefiedSpeciesGlom,
+             "RDA",
+             "unifrac",
+             "Group",
+             "Genus") +
+  facet_grid(~Group, scales = "free_x")  + 
+  theme(panel.spacing=unit(0, "lines"))
+
+dataSamplesSpeciesGlomRarefied <- tax_glom(dataSamplesPrunedRarefied, taxrank="Species", NArm=TRUE, bad_empty=c(NA, "", " ", "\t"))
+
+genera_affected_vector <- levels(combined_sigtable$Genus)
+
+#genera_affected_sp_glom <- subset_taxa(dataSamplesPrunedRarefiedSpeciesGlom, Genus %in% genera_affected_vector)
+#genera_affected_sp_glom_rarefied <- subset_taxa(dataSamplesSpeciesGlomRarefied, Genus %in% genera_affected_vector)
+
+# plot_heatmap(genera_affected, method="NMDS", distance="jaccard", "Group", "Genus", sample.order=sampleOrder[c(1:40,61:70,41:60,71:118)]) ## Nice
+plot_heatmap(dataSamplesPrunedRarefiedSpeciesGlom, "RDA", "none", "Group", "Genus", sample.order=myOrder$sample)
+# plot_heatmap(genera_affected_sp_glom, "RDA", "none", "Group", "Genus", sample.order=myOrder$sample)
+# plot_heatmap(genera_affected_sp_glom_rarefied, "MDS", "unifrac", "Silver_Concentration", "Genus",    sample.order=sampleOrder)
+# plot_heatmap(dataSamplesPrunedRarefiedSpeciesGlom, "RDA", "unifrac", "Silver.Concentration", "Genus",    sample.order=sampleOrder[c(1:40,61:70,41:60,71:118)])
+
+# ORDERING TAXA
+sigtab5Y$taxID <- row.names(sigtab5Y)
+sigtab5N$taxID <- row.names(sigtab5N)
+sigtab1Y$taxID <- row.names(sigtab1Y)
+sigtab1N$taxID <- row.names(sigtab1N)
+sigtab0Y$taxID <- row.names(sigtab0Y)
+
+orderedGenera5N <- as.character(arrange(sigtab5N, log2FoldChange)$taxID[!is.na(arrange(sigtab5N, log2FoldChange)$taxID)])
+# orderedGenera833Filtered <- intersect(taxa_names(genera_affected_sp_glom), orderedGenera833)
+orderedGenera0Y <- as.character(arrange(sigtab0Y, log2FoldChange)$taxID[!is.na(arrange(sigtab0Y, log2FoldChange)$taxID)])
+# orderedGenera60Filtered <- intersect(taxa_names(genera_affected_sp_glom), orderedGenera60)
+orderedGenera1N <- as.character(arrange(sigtab1N, log2FoldChange)$taxID[!is.na(arrange(sigtab1N, log2FoldChange)$taxID)])
+orderedGenera1Y <- as.character(arrange(sigtab1Y, log2FoldChange)$taxID[!is.na(arrange(sigtab1Y, log2FoldChange)$taxID)])
+orderedGenera5Y <- as.character(arrange(sigtab5Y, log2FoldChange)$taxID[!is.na(arrange(sigtab5Y, log2FoldChange)$taxID)])
+
+# plot_heatmap(genera_affected_sp_glom, "MDS", "jaccard", "Silver_Concentration", "Genus",  sample.order=sampleOrder, taxa.order= orderedGenera  )
+# plot_heatmap(dataSamples, "none", "none", "Silver.Concentration", taxa.label="Genus", sample.order=sampleOrder, taxa.order= orderedGenera, max.label=2500)
+
+# plot_heatmap(dataSamplesPruned, "none", "none", "Silver_Concentration", taxa.label="Genus", sample.order=sampleOrder, taxa.order= orderedGenera833, max.label=2500)
+
+# psForHeatmap <- subset_taxa(ps, Genus %in% genera_affected_vector)
+# psForHeatmap <- prune_taxa(orderedGenera5Y, ps)
+
+psForHeatmap <- tax_glom(dataSamplesPrunedRarefiedGenusGlom, taxrank = "Genus", NArm = T)
+
+# For paper:
+plot_heatmap(psForHeatmap,
+                  "RDA",
+                  "none",
+                  "Group",
+                  taxa.label="Genus",
+                  taxa.order=orderedGenera1Y, max.label=5000) +
+  facet_grid(~Group, scales="free_x") +
+  theme_bw() + 
+  theme(panel.spacing=unit(0, "lines"),
+       axis.text.x=element_blank(),
+       axis.title.x=element_blank()) 
+
+plot_heatmap(psForHeatmap,
+                  "RDA",
+                  "none",
+                  "Group",
+                  taxa.label="Genus") +
+  facet_grid(~Group, scales="free_x") +
+  theme_bw() + 
+  theme(panel.spacing=unit(0, "lines"),
+       axis.text.x=element_blank(),
+       axis.title.x=element_blank()) 
+
+
+p <- plot_heatmap(psForHeatmap,
+                  "none",
+                  "none",
+                  "Group",
+                  taxa.label="Genus",
+                  sample.order=sampleOrder[c(1:40,61:70,41:60,71:119)],
+                  taxa.order=orderedGenera5Y, max.label=5000)
+p$scales$scales[[1]]$name <- "Treatment"
+p + theme (axis.text.x = element_text(size=10), axis.text.y = element_text(size=10))
+print(p)
+
+ps_glom_genus %>% 
+  psmelt() %>% 
+  group_by(Sample) %>% 
+  mutate(Proportion = Abundance / sum(Abundance, na.rm = TRUE)) %>% 
+  filter(Proportion > 0) %>% 
+  filter(!is.na(Class)) %>% 
+  ggplot(aes(y = Class, x = log10(Proportion), fill = Class)) +
+  ggridges::geom_density_ridges2(scale = 1, alpha = 0.7, show.legend = FALSE) +
+  ggtitle("Compare distribution of relative abundances") +
+  #geom_violin() +
+  facet_grid(~Group)
+
+ps_glom_genus %>% 
+  psmelt() %>% 
+  group_by(Sample) %>% 
+  mutate(Proportion = Abundance / sum(Abundance, na.rm = TRUE)) %>% 
+  filter(Proportion > 0) %>% 
+  filter(!is.na(Class)) %>% 
+  ggplot(aes(y = Class, x = log10(Abundance), fill = Class)) +
+  geom_col() +
+  facet_grid(~Group)
+
+# p <- plot_heatmap(dataSamplesPrunedRarefiedGenusGlom, "none", "none", "Silver_Concentration", taxa.label="Genus", sample.order=sampleOrder, taxa.order= orderedGenera833, max.label=5000)
+# p$scales$scales[[1]]$name <- "Silver Concentration"
+# p + theme (axis.text.x = element_text(size=10), axis.text.y = element_text(size=10))
+
+```
+
+# Run statistical tests
+
+```{r stat_tests}
+
+hist(richness_df$Shannon, main="Shannon diversity", xlab="", breaks=10)
+shapiro.test(richness_df$Shannon)
+
+hist(richness_df$Chao1, main="Chao1 diversity", xlab="", breaks=10)
+shapiro.test(richness_df$Chao1)
+
+hist(richness_df$Observed, main="Observed diversity", xlab="", breaks=10)
+shapiro.test(richness_df$Observed)
+
+hist(richness_df$Simpson, main="Simpson diversity", xlab="", breaks=10)
+shapiro.test(richness_df$Simpson)
+
+hist(richness_df$Fisher, main="Fisher diversity", xlab="", breaks=10)
+shapiro.test(richness_df$Fisher)
+
+
+pairwise.wilcox.test(richness_df$Shannon, sampledata.df$Group, p.adjust.method="fdr")
+pairwise.wilcox.test(richness_df$Chao1, sampledata.df$Group, p.adjust.method="fdr")
+pairwise.wilcox.test(richness_df$Observed, sampledata.df$Group, p.adjust.method="fdr")
+pairwise.wilcox.test(richness_df$Simpson, sampledata.df$Group, p.adjust.method="fdr")
+pairwise.wilcox.test(richness_df$Fisher, sampledata.df$Group, p.adjust.method="fdr")
+
+
+```
+
