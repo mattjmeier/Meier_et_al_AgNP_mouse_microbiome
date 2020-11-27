@@ -751,8 +751,8 @@ wb1 <- createWorkbook()
 modifyBaseFont(wb1, fontSize = 10, fontName = "Arial Narrow")
 addWorksheet(wb1, "DESeq_results_per_gene")
 for (j in 1:length(contrastsInSummary)) {
-  myStartcol=7+((j-1)*3)
-  myEndcol=9+((j-1)*3)
+  myStartcol=8+((j-1)*3) # SPECIFIES WHERE THE DATA COLUMNS START - DEPENDS ON NUM OF LEADING COLUMNS
+  myEndcol=10+((j-1)*3)
   mergeCells(wb1,
              sheet = 1,
              cols = myStartcol:myEndcol,
@@ -1017,29 +1017,30 @@ This plot shows how samples are clustered based on their euclidean distance usin
 
 ```{r 'heatmap_all_DEGs', collapse=TRUE}
 
-mat <- assay(rld)[row.names(assay(rld)) %in% (significantResults %>% arrange(-abs(log2FoldChange)) %>% head() ),]
-mat <- mat - rowMeans(mat)
-
-# quantile_breaks <- function(xs, n = 10) {
-#   breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
-#   breaks[!duplicated(breaks)]
-# }
+# mat <- assay(rld)[row.names(assay(rld)) %in% (significantResults %>% arrange(-abs(log2FoldChange)) %>% 
+#                                                 head() ) ,]
+# mat <- mat - rowMeans(mat)
 # 
-# mat_breaks <- quantile_breaks(mat, n = 11)
+# # quantile_breaks <- function(xs, n = 10) {
+# #   breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+# #   breaks[!duplicated(breaks)]
+# # }
+# # 
+# # mat_breaks <- quantile_breaks(mat, n = 11)
+# # pheatmap(mat,
+# #          annotation_col=heatmap_df,
+# #          show_rownames = FALSE,
+# #          border_color = NA,
+# #          scale="row",
+# #          breaks = mat_breaks)
+# 
+# heatmap_df <- as.data.frame(colData(rld)[,c("Antibiotics","Silver_concentration")])
 # pheatmap(mat,
-#          annotation_col=heatmap_df,
+#          annotation_col = heatmap_df,
 #          show_rownames = FALSE,
 #          border_color = NA,
-#          scale="row",
-#          breaks = mat_breaks)
-
-heatmap_df <- as.data.frame(colData(rld)[,c("Antibiotics","Silver_concentration")])
-pheatmap(mat,
-         annotation_col = heatmap_df,
-         show_rownames = FALSE,
-         border_color = NA,
-         color = inferno(10))
-# color = inferno(10)
+#          color = inferno(10))
+# # color = inferno(10)
 
 
 
