@@ -300,6 +300,49 @@ uniquesToFasta(seqtab.nochim, fout='rep-seqs.fna', ids=colnames(seqtab.nochim))
 richness_df <- estimate_richness(ps_untrimmed, split = TRUE, measures = NULL)
 richness_df$sample <- row.names(richness_df)
 richness_df <- richness_df %>% dplyr::arrange(Observed)
+row.names(richness_df) <- str_replace(pattern="X", string=row.names(richness_df), replacement="")
+row.names(richness_df) <- str_replace(pattern="X", string=row.names(richness_df), replacement="")
+row.names(richness_df) <- str_replace_all(pattern="\\.", string=row.names(richness_df), replacement="-")
+richness_df$sample <- row.names(richness_df)
+sampledata.df.richness <- sampledata.df
+sampledata.df.richness$sample <- row.names(sampledata.df.richness)
+richness_df <- richness_df %>% left_join(sampledata.df.richness)
+
+model = lm(Observed ~ Group,
+           data=richness_df)
+
+model2 = lm(Observed ~ Silver_Concentration * Antibiotics + Replicate,
+           data=richness_df)
+
+library(car)
+# Simplified
+Anova(model, type="II")
+summary(model)
+
+hist(residuals(model),
+     col="darkgray")
+
+plot(fitted(model),
+     residuals(model))
+
+# Covariates
+Anova(model2, type="II")
+summary(model2)
+
+hist(residuals(model2),
+     col="darkgray")
+
+plot(fitted(model2),
+     residuals(model))
+
+res.aov <- aov(Observed ~ Antibiotics + Silver_Treatment + Antibiotics:Silver_Treatment + Replicate,
+               data=richness_df)
+
+summary(res.aov)
+TukeyHSD(res.aov, which = "Antibiotics")
+TukeyHSD(res.aov, which = "Silver_Treatment")
+
+# plot(model2)
 
 ### Plot Richness
 abio.labs <- c("No antibiotics","With antibiotics")

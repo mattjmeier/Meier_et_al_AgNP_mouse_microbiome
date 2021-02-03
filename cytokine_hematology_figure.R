@@ -46,7 +46,7 @@ ggplot(cytokines.down, aes(x=Ab, y=concentration, color=Treatment)) +
 dev.off()
 
 
-blood <- read.table("./HaematologySummary.txt", header=T, sep="\t", check.names = F)
+blood <- read.table("./Haematol                                                            ogySummary.txt", header=T, sep="\t", check.names = F)
 blood$Silver <- factor(blood$Silver, levels=c("Control", "Ag10","Ag50"))
 blood.long <- pivot_longer(blood, cols=4:ncol(blood), names_to="Marker", values_to="Count")
 
